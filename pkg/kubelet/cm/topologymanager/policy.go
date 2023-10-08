@@ -39,6 +39,7 @@ func mergePermutation(numaNodes []int, permutation []TopologyHint) TopologyHint 
 	preferred := true
 	defaultAffinity, _ := bitmask.NewBitMask(numaNodes...)
 	var numaAffinities []bitmask.BitMask
+	var interPodAffinityScore []int
 	for _, hint := range permutation {
 		// Only consider hints that have an actual NUMANodeAffinity set.
 		if hint.NUMANodeAffinity != nil {
@@ -52,13 +53,22 @@ func mergePermutation(numaNodes []int, permutation []TopologyHint) TopologyHint 
 		if !hint.Preferred {
 			preferred = false
 		}
+		// Add all providers' InterPodAffinityScoreOfNUMA if it's not nil
+		if hint.InterPodAffinityScoreOfNUMA != nil {
+			if interPodAffinityScore == nil {
+				interPodAffinityScore = make([]int, len(permutation[0].InterPodAffinityScoreOfNUMA))
+			}
+			for i := 0; i < len(interPodAffinityScore); i++ {
+				interPodAffinityScore[i] += hint.InterPodAffinityScoreOfNUMA[i]
+			}
+		}
 	}
 
 	// Merge the affinities using a bitwise-and operation.
 	mergedAffinity := bitmask.And(defaultAffinity, numaAffinities...)
 	// Build a mergedHint from the merged affinity mask, setting preferred as
 	// appropriate based on the logic above.
-	return TopologyHint{mergedAffinity, preferred}
+	return TopologyHint{mergedAffinity, preferred, interPodAffinityScore}
 }
 
 func filterProvidersHints(providersHints []map[string][]TopologyHint) [][]TopologyHint {
@@ -70,7 +80,7 @@ func filterProvidersHints(providersHints []map[string][]TopologyHint) [][]Topolo
 		// If hints is nil, insert a single, preferred any-numa hint into allProviderHints.
 		if len(hints) == 0 {
 			klog.InfoS("Hint Provider has no preference for NUMA affinity with any resource")
-			allProviderHints = append(allProviderHints, []TopologyHint{{nil, true}})
+			allProviderHints = append(allProviderHints, []TopologyHint{{nil, true, nil}})
 			continue
 		}
 
@@ -78,13 +88,13 @@ func filterProvidersHints(providersHints []map[string][]TopologyHint) [][]Topolo
 		for resource := range hints {
 			if hints[resource] == nil {
 				klog.InfoS("Hint Provider has no preference for NUMA affinity with resource", "resource", resource)
-				allProviderHints = append(allProviderHints, []TopologyHint{{nil, true}})
+				allProviderHints = append(allProviderHints, []TopologyHint{{nil, true, nil}})
 				continue
 			}
 
 			if len(hints[resource]) == 0 {
 				klog.InfoS("Hint Provider has no possible NUMA affinities for resource", "resource", resource)
-				allProviderHints = append(allProviderHints, []TopologyHint{{nil, false}})
+				allProviderHints = append(allProviderHints, []TopologyHint{{nil, false, nil}})
 				continue
 			}
 
@@ -127,7 +137,51 @@ func maxOfMinAffinityCounts(filteredHints [][]TopologyHint) int {
 	return maxOfMinCount
 }
 
+func computeHintAffinityScore(hint *TopologyHint) int {
+	if hint.InterPodAffinityScoreOfNUMA == nil {
+		return 0
+	}
+	NUMANodes := hint.NUMANodeAffinity.GetBits()
+	affinityScore := 0
+	for _, node := range NUMANodes {
+		affinityScore += hint.InterPodAffinityScoreOfNUMA[node]
+	}
+	return affinityScore
+}
+
 func compareHints(bestNonPreferredAffinityCount int, current *TopologyHint, candidate *TopologyHint) *TopologyHint {
+	// A hint is said to be "narrower" than another if it has less NUMA nodes.
+	// If the same number of NUMA nodes are set in both hints, then the hints
+	// with higher AffinityScore wins out.
+	// If the same number of AffinityScore are set in both hints, the hints with
+	// lower-numbered bits set wins out.
+	isCurrentNarrower := func(current *TopologyHint, candidate *TopologyHint) bool {
+		// Compare number of NUMA nodes
+		if current.NUMANodeAffinity.Count() < candidate.NUMANodeAffinity.Count() {
+			return true
+		} else if current.NUMANodeAffinity.Count() > candidate.NUMANodeAffinity.Count() {
+			return false
+		}
+
+		// Compare affinity score
+		currentScore := computeHintAffinityScore(current)
+		candidateScore := computeHintAffinityScore(candidate)
+		if currentScore > candidateScore {
+			return true
+		} else if currentScore < candidateScore {
+			return false
+		}
+
+		// Compare lower-numbered bits
+		if current.NUMANodeAffinity.GetNum() < candidate.NUMANodeAffinity.GetNum() {
+			return true
+		} else if current.NUMANodeAffinity.GetNum() > candidate.NUMANodeAffinity.GetNum() {
+			return false
+		}
+
+		return true
+	}
+
 	// Only consider candidates that result in a NUMANodeAffinity > 0 to
 	// replace the current bestHint.
 	if candidate.NUMANodeAffinity.Count() == 0 {
@@ -156,7 +210,7 @@ func compareHints(bestNonPreferredAffinityCount int, current *TopologyHint, cand
 	// then only consider candidate hints that have a narrower
 	// NUMANodeAffinity than the NUMANodeAffinity in the current bestHint.
 	if current.Preferred && candidate.Preferred {
-		if candidate.NUMANodeAffinity.IsNarrowerThan(current.NUMANodeAffinity) {
+		if !isCurrentNarrower(current, candidate) {
 			return candidate
 		}
 		return current
@@ -220,7 +274,7 @@ func compareHints(bestNonPreferredAffinityCount int, current *TopologyHint, cand
 
 	// Case 1
 	if current.NUMANodeAffinity.Count() > bestNonPreferredAffinityCount {
-		if candidate.NUMANodeAffinity.IsNarrowerThan(current.NUMANodeAffinity) {
+		if !isCurrentNarrower(current, candidate) {
 			return candidate
 		}
 		return current
@@ -230,7 +284,7 @@ func compareHints(bestNonPreferredAffinityCount int, current *TopologyHint, cand
 		if candidate.NUMANodeAffinity.Count() != bestNonPreferredAffinityCount {
 			return current
 		}
-		if candidate.NUMANodeAffinity.IsNarrowerThan(current.NUMANodeAffinity) {
+		if !isCurrentNarrower(current, candidate) {
 			return candidate
 		}
 		return current
@@ -252,7 +306,7 @@ func compareHints(bestNonPreferredAffinityCount int, current *TopologyHint, cand
 		return current
 	}
 	// Case 3cc
-	if candidate.NUMANodeAffinity.IsNarrowerThan(current.NUMANodeAffinity) {
+	if !isCurrentNarrower(current, candidate) {
 		return candidate
 	}
 	return current
@@ -280,7 +334,7 @@ func mergeFilteredHints(numaNodes []int, filteredHints [][]TopologyHint) Topolog
 
 	if bestHint == nil {
 		defaultAffinity, _ := bitmask.NewBitMask(numaNodes...)
-		bestHint = &TopologyHint{defaultAffinity, false}
+		bestHint = &TopologyHint{defaultAffinity, false, nil}
 	}
 
 	return *bestHint
@@ -293,18 +347,19 @@ func mergeFilteredHints(numaNodes []int, filteredHints [][]TopologyHint) Topolog
 // permutation as it is found. It is the equivalent of:
 //
 // for i := 0; i < len(providerHints[0]); i++
-//     for j := 0; j < len(providerHints[1]); j++
-//         for k := 0; k < len(providerHints[2]); k++
-//             ...
-//             for z := 0; z < len(providerHints[-1]); z++
-//                 permutation := []TopologyHint{
-//                     providerHints[0][i],
-//                     providerHints[1][j],
-//                     providerHints[2][k],
-//                     ...
-//                     providerHints[-1][z]
-//                 }
-//                 callback(permutation)
+//
+//	for j := 0; j < len(providerHints[1]); j++
+//	    for k := 0; k < len(providerHints[2]); k++
+//	        ...
+//	        for z := 0; z < len(providerHints[-1]); z++
+//	            permutation := []TopologyHint{
+//	                providerHints[0][i],
+//	                providerHints[1][j],
+//	                providerHints[2][k],
+//	                ...
+//	                providerHints[-1][z]
+//	            }
+//	            callback(permutation)
 func iterateAllProviderTopologyHints(allProviderHints [][]TopologyHint, callback func([]TopologyHint)) {
 	// Internal helper function to accumulate the permutation before calling the callback.
 	var iterate func(i int, accum []TopologyHint)

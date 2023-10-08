@@ -38,6 +38,7 @@ type BitMask interface {
 	String() string
 	Count() int
 	GetBits() []int
+	GetNum() uint64
 }
 
 type bitMask uint64
@@ -175,6 +176,11 @@ func (s *bitMask) GetBits() []int {
 		}
 	}
 	return bits
+}
+
+// GetNum() returns the uint64 number corresponding bits
+func (s *bitMask) GetNum() uint64 {
+	return uint64(*s)
 }
 
 // And is a package level implementation of 'and' between first and masks

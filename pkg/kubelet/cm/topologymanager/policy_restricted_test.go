@@ -46,12 +46,12 @@ func TestPolicyRestrictedCanAdmitPodResult(t *testing.T) {
 	}{
 		{
 			name:     "Preferred is set to false in topology hints",
-			hint:     TopologyHint{nil, false},
+			hint:     TopologyHint{nil, false, nil},
 			expected: false,
 		},
 		{
 			name:     "Preferred is set to true in topology hints",
-			hint:     TopologyHint{nil, true},
+			hint:     TopologyHint{nil, true, nil},
 			expected: true,
 		},
 	}

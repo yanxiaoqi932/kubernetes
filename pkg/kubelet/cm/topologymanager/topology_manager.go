@@ -20,7 +20,7 @@ import (
 	"fmt"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
@@ -92,7 +92,7 @@ type HintProvider interface {
 	Allocate(pod *v1.Pod, container *v1.Container) error
 }
 
-//Store interface is to allow Hint Providers to retrieve pod affinity
+// Store interface is to allow Hint Providers to retrieve pod affinity
 type Store interface {
 	GetAffinity(podUID string, containerName string) TopologyHint
 }
@@ -103,6 +103,9 @@ type TopologyHint struct {
 	// Preferred is set to true when the NUMANodeAffinity encodes a preferred
 	// allocation for the Container. It is set to false otherwise.
 	Preferred bool
+	// InterPodAffinityScoreOfNUMA is used to record the inter-pod affinity score of
+	// pod for each NUMA.
+	InterPodAffinityScoreOfNUMA []int
 }
 
 // IsEqual checks if TopologyHint are equal
